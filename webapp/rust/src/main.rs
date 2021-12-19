@@ -1,10 +1,8 @@
-use actix_web::{web, HttpResponse};
 use chrono::DurationRound as _;
 use chrono::Offset as _;
 use chrono::TimeZone as _;
 use chrono::{DateTime, NaiveDateTime};
 use futures::StreamExt as _;
-use futures::TryStreamExt as _;
 use std::collections::{HashMap, HashSet};
 
 const SESSION_NAME: &str = "isucondition_rust";
@@ -33,6 +31,7 @@ lazy_static::lazy_static! {
 
 #[derive(Debug, sqlx::FromRow)]
 struct Config {
+    #[allow(dead_code)]
     name: String,
     url: String,
 }
@@ -43,13 +42,17 @@ struct Isu {
     jia_isu_uuid: String,
     name: String,
     #[serde(skip)]
+    #[allow(dead_code)]
     image: Vec<u8>,
     character: String,
     #[serde(skip)]
+    #[allow(dead_code)]
     jia_user_id: String,
     #[serde(skip)]
+    #[allow(dead_code)]
     created_at: DateTime<chrono::FixedOffset>,
     #[serde(skip)]
+    #[allow(dead_code)]
     updated_at: DateTime<chrono::FixedOffset>,
 }
 impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for Isu {
@@ -90,12 +93,14 @@ struct GetIsuListResponse {
 
 #[derive(Debug)]
 struct IsuCondition {
+    #[allow(dead_code)]
     id: i64,
     jia_isu_uuid: String,
     timestamp: DateTime<chrono::FixedOffset>,
     is_sitting: bool,
     condition: String,
     message: String,
+    #[allow(dead_code)]
     created_at: DateTime<chrono::FixedOffset>,
 }
 impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for IsuCondition {
@@ -183,6 +188,7 @@ struct ConditionsPercentage {
 
 #[derive(Debug)]
 struct GraphDataPointWithInfo {
+    #[allow(dead_code)]
     jia_isu_uuid: String,
     start_at: DateTime<chrono::FixedOffset>,
     data: GraphDataPoint,
@@ -229,10 +235,12 @@ struct JIAServiceRequest<'a> {
     isu_uuid: &'a str,
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,sqlx=warn"))
-        .init();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "info,sqlx=warn,tower_http=debug");
+    }
+    tracing_subscriber::fmt::init();
     let mysql_connection_env = MySQLConnectionEnv::default();
 
     let pool = sqlx::mysql::MySqlPoolOptions::new()
@@ -263,86 +271,94 @@ async fn main() -> std::io::Result<()> {
         session_key.resize(32, 0);
     }
 
-    let server = actix_web::HttpServer::new(move || {
-        actix_web::App::new()
-            .app_data(web::JsonConfig::default().error_handler(|err, _| {
-                if matches!(err, actix_web::error::JsonPayloadError::Deserialize(_)) {
-                    actix_web::error::ErrorBadRequest("bad request body")
-                } else {
-                    actix_web::error::ErrorBadRequest(err)
-                }
-            }))
-            .app_data(web::Data::new(pool.clone()))
-            .wrap(actix_web::middleware::Logger::default())
-            .wrap(
-                actix_session::CookieSession::signed(&session_key)
-                    .secure(false)
-                    .name(SESSION_NAME)
-                    .max_age(2592000),
+    let get_index: axum::routing::MethodRouter =
+        axum::routing::get_service(tower_http::services::ServeFile::new(
+            std::path::Path::new(FRONTEND_CONTENTS_PATH).join("index.html"),
+        ))
+        .handle_error(|e| async move {
+            (
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("unable to serve index.html: {}", e),
             )
-            .service(post_initialize)
-            .service(post_authentication)
-            .service(post_signout)
-            .service(get_me)
-            .service(get_isu_list)
-            .service(post_isu)
-            .service(get_isu_id)
-            .service(get_isu_icon)
-            .service(get_isu_graph)
-            .service(get_isu_conditions)
-            .service(get_trend)
-            .service(post_isu_condition)
-            .route("/", web::get().to(get_index))
-            .route("/isu/{jia_isu_uuid}", web::get().to(get_index))
-            .route("/isu/{jia_isu_uuid}/condition", web::get().to(get_index))
-            .route("/isu/{jia_isu_uuid}/graph", web::get().to(get_index))
-            .route("/register", web::get().to(get_index))
-            .service(actix_files::Files::new(
-                "/assets",
+        });
+    let app = axum::Router::new()
+        .route("/initialize", axum::routing::post(post_initialize))
+        .route("/api/auth", axum::routing::post(post_authentication))
+        .route("/api/signout", axum::routing::post(post_signout))
+        .route("/api/user/me", axum::routing::get(get_me))
+        .route("/api/isu", axum::routing::get(get_isu_list).post(post_isu))
+        .route("/api/isu/:jia_isu_uuid", axum::routing::get(get_isu_id))
+        .route(
+            "/api/isu/:jia_isu_uuid/icon",
+            axum::routing::get(get_isu_icon),
+        )
+        .route(
+            "/api/isu/:jia_isu_uuid/graph",
+            axum::routing::get(get_isu_graph),
+        )
+        .route(
+            "/api/condition/:jia_isu_uuid",
+            axum::routing::get(get_isu_conditions).post(post_isu_condition),
+        )
+        .route("/api/trend", axum::routing::get(get_trend))
+        .route("/", get_index.clone())
+        .route("/isu/:jia_isu_uuid", get_index.clone())
+        .route("/isu/:jia_isu_uuid/condition", get_index.clone())
+        .route("/isu/:jia_isu_uuid/graph", get_index.clone())
+        .route("/register", get_index)
+        .nest(
+            "/assets",
+            axum::routing::get_service(tower_http::services::ServeDir::new(
                 std::path::Path::new(FRONTEND_CONTENTS_PATH).join("assets"),
             ))
-    });
+            .handle_error(|e| async move {
+                (
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unable to serve /assets: {}", e),
+                )
+            }),
+        )
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(axum::AddExtensionLayer::new(pool))
+        .layer(tower_cookie_store::CookieStoreLayer::new(
+            &session_key,
+            SESSION_NAME,
+        ));
     let server = if let Some(l) = listenfd::ListenFd::from_env().take_tcp_listener(0)? {
-        server.listen(l)?
+        axum::Server::from_tcp(l)?
     } else {
-        server.bind((
-            "0.0.0.0",
+        axum::Server::bind(&std::net::SocketAddr::from((
+            [0, 0, 0, 0],
             std::env::var("SERVER_APP_PORT")
                 .map(|port_str| port_str.parse().expect("Failed to parse SERVER_APP_PORT"))
                 .unwrap_or(3000),
-        ))?
+        )))
     };
-    server.run().await
+    Ok(server.serve(app.into_make_service()).await?)
 }
 
-#[derive(Debug)]
-struct SqlxError(sqlx::Error);
-impl std::fmt::Display for SqlxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
+#[derive(thiserror::Error, Debug)]
+enum Error {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("SQLx error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("axum extension rejection: {0}")]
+    AxumExtension(#[from] axum::extract::rejection::ExtensionRejection),
+    #[error("{1}")]
+    Custom(http::StatusCode, &'static str),
 }
-impl actix_web::ResponseError for SqlxError {
-    fn error_response(&self) -> HttpResponse {
-        log::error!("db error: {}", self.0);
-        HttpResponse::InternalServerError()
-            .content_type(mime::TEXT_PLAIN)
-            .body(format!("SQLx error: {:?}", self.0))
-    }
-}
-
-#[derive(Debug)]
-struct ReqwestError(reqwest::Error);
-impl std::fmt::Display for ReqwestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl actix_web::ResponseError for ReqwestError {
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::InternalServerError()
-            .content_type(mime::TEXT_PLAIN)
-            .body(format!("reqwest error: {:?}", self.0))
+impl axum::response::IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Io(_) | Self::Sqlx(_) | Self::Reqwest(_) => {
+                (http::StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self)).into_response()
+            }
+            Self::AxumExtension(e) => e.into_response(),
+            Self::Custom(status, message) => (status, message).into_response(),
+        }
     }
 }
 
@@ -438,25 +454,30 @@ where
 
 async fn require_signed_in<'e, 'c, E>(
     executor: E,
-    session: actix_session::Session,
-) -> actix_web::Result<String>
+    session: tower_cookie_store::Session,
+) -> Result<String, Error>
 where
     'c: 'e,
     E: 'e + sqlx::Executor<'c, Database = sqlx::MySql>,
 {
-    if let Some(jia_user_id) = session.get("jia_user_id")? {
+    if let Some(jia_user_id) = session.get("jia_user_id") {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?")
             .bind(&jia_user_id)
             .fetch_one(executor)
-            .await
-            .map_err(SqlxError)?;
+            .await?;
         if count == 0 {
-            Err(actix_web::error::ErrorUnauthorized("not found: user"))
+            Err(Error::Custom(
+                http::StatusCode::UNAUTHORIZED,
+                "not found: user",
+            ))
         } else {
             Ok(jia_user_id)
         }
     } else {
-        Err(actix_web::error::ErrorUnauthorized("you are not signed in"))
+        Err(Error::Custom(
+            http::StatusCode::UNAUTHORIZED,
+            "you are not signed in",
+        ))
     }
 }
 
@@ -473,21 +494,21 @@ async fn get_jia_service_url(tx: &mut sqlx::Transaction<'_, sqlx::MySql>) -> sql
 }
 
 // サービスを初期化
-#[actix_web::post("/initialize")]
+// POST /initialize
 async fn post_initialize(
-    pool: web::Data<sqlx::MySqlPool>,
-    request: web::Json<InitializeRequest>,
-) -> actix_web::Result<HttpResponse> {
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    request: axum::extract::Json<InitializeRequest>,
+) -> Result<axum::Json<InitializeResponse>, Error> {
     let status = tokio::process::Command::new("../sql/init.sh")
         .status()
         .await
         .map_err(|e| {
-            log::error!("exec init.sh error: {}", e);
+            tracing::error!("exec init.sh error: {}", e);
             e
         })?;
     if !status.success() {
-        log::error!("exec init.sh failed with exit code {:?}", status.code());
-        return Err(actix_web::error::ErrorInternalServerError(""));
+        tracing::error!("exec init.sh failed with exit code {:?}", status.code());
+        return Err(Error::Custom(http::StatusCode::INTERNAL_SERVER_ERROR, ""));
     }
 
     sqlx::query(
@@ -495,10 +516,9 @@ async fn post_initialize(
     )
     .bind("jia_service_url")
     .bind(&request.jia_service_url)
-    .execute(pool.as_ref())
-    .await
-    .map_err(SqlxError)?;
-    Ok(HttpResponse::Ok().json(InitializeResponse {
+    .execute(&*pool)
+    .await?;
+    Ok(axum::Json(InitializeResponse {
         language: "rust".to_owned(),
     }))
 }
@@ -508,85 +528,117 @@ struct Claims {
     jia_user_id: String,
 }
 
-// サインアップ・サインイン
-#[actix_web::post("/api/auth")]
-async fn post_authentication(
-    pool: web::Data<sqlx::MySqlPool>,
-    request: actix_web::HttpRequest,
-    session: actix_session::Session,
-) -> actix_web::Result<HttpResponse> {
-    let req_jwt = request
-        .headers()
-        .get("Authorization")
-        .map(|value| value.to_str().unwrap_or_default())
-        .unwrap_or_default()
-        .trim_start_matches("Bearer ");
+struct JWTAuthorizationHeader {
+    jwt: String,
+}
+impl headers::Header for JWTAuthorizationHeader {
+    fn name() -> &'static http::header::HeaderName {
+        &http::header::AUTHORIZATION
+    }
 
-    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
-    let token = match jsonwebtoken::decode(req_jwt, &JIA_JWT_SIGNING_KEY, &validation) {
-        Ok(token) => token,
-        Err(e) => {
-            if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::Json(_)) {
-                return Err(actix_web::error::ErrorBadRequest("invalid JWT payload"));
+    fn decode<'i, I>(values: &mut I) -> Result<Self, headers::Error>
+    where
+        I: Iterator<Item = &'i http::HeaderValue>,
+    {
+        if let Some(value) = values.next() {
+            if let Ok(s) = value.to_str() {
+                Ok(Self { jwt: s.to_string() })
             } else {
-                return Err(actix_web::error::ErrorForbidden("forbidden"));
+                Err(headers::Error::invalid())
             }
+        } else {
+            Err(headers::Error::invalid())
         }
-    };
+    }
+
+    fn encode<E>(&self, _values: &mut E)
+    where
+        E: Extend<http::HeaderValue>,
+    {
+        unreachable!()
+    }
+}
+
+// サインアップ・サインイン
+// POST /api/auth
+async fn post_authentication(
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    authorization_header: Option<axum::extract::TypedHeader<JWTAuthorizationHeader>>,
+    session: tower_cookie_store::Session,
+) -> Result<(), Error> {
+    if authorization_header.is_none() {
+        return Err(Error::Custom(http::StatusCode::FORBIDDEN, "forbidden"));
+    }
+    let authorization_header = authorization_header.unwrap().0;
+    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    let token =
+        match jsonwebtoken::decode(&authorization_header.jwt, &JIA_JWT_SIGNING_KEY, &validation) {
+            Ok(token) => token,
+            Err(e) => {
+                if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::Json(_)) {
+                    return Err(Error::Custom(
+                        http::StatusCode::BAD_REQUEST,
+                        "invalid JWT payload",
+                    ));
+                } else {
+                    return Err(Error::Custom(http::StatusCode::FORBIDDEN, "forbidden"));
+                }
+            }
+        };
 
     let claims: Claims = token.claims;
     let jia_user_id = claims.jia_user_id;
 
     sqlx::query("INSERT IGNORE INTO user (`jia_user_id`) VALUES (?)")
         .bind(&jia_user_id)
-        .execute(pool.as_ref())
-        .await
-        .map_err(SqlxError)?;
+        .execute(&*pool)
+        .await?;
 
-    session.insert("jia_user_id", jia_user_id).map_err(|e| {
-        log::error!("failed to set cookie: {}", e);
-        e
-    })?;
+    session
+        .insert("jia_user_id".to_owned(), &jia_user_id)
+        .unwrap();
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(())
 }
 
 // サインアウト
-#[actix_web::post("/api/signout")]
-async fn post_signout(session: actix_session::Session) -> actix_web::Result<HttpResponse> {
+// POST /api/signout
+async fn post_signout(session: tower_cookie_store::Session) -> Result<(), Error> {
     if session.remove("jia_user_id").is_some() {
-        Ok(HttpResponse::Ok().finish())
+        Ok(())
     } else {
-        Err(actix_web::error::ErrorUnauthorized("you are not signed in"))
+        Err(Error::Custom(
+            http::StatusCode::UNAUTHORIZED,
+            "you are not signed in",
+        ))
     }
 }
 
 // サインインしている自分自身の情報を取得
-#[actix_web::get("/api/user/me")]
+// GET /api/user/me
 async fn get_me(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
-    Ok(HttpResponse::Ok().json(GetMeResponse { jia_user_id }))
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+) -> Result<axum::Json<GetMeResponse>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
+    Ok(axum::Json(GetMeResponse { jia_user_id }))
 }
 
 // ISUの一覧を取得
-#[actix_web::get("/api/isu")]
+// GET /api/isu
 async fn get_isu_list(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+) -> Result<axum::Json<Vec<GetIsuListResponse>>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
-    let mut tx = pool.begin().await.map_err(SqlxError)?;
+    let mut tx = pool.begin().await?;
 
     let isu_list: Vec<Isu> =
         sqlx::query_as("SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC")
             .bind(&jia_user_id)
             .fetch_all(&mut tx)
-            .await
-            .map_err(SqlxError)?;
+            .await?;
 
     let mut response_list = Vec::new();
     for isu in isu_list {
@@ -596,14 +648,13 @@ async fn get_isu_list(
             ).bind(&isu.jia_isu_uuid),
             &mut tx
         )
-        .await
-        .map_err(SqlxError)?;
+        .await?;
 
         let formatted_condition = if let Some(last_condition) = last_condition {
             let condition_level = calculate_condition_level(&last_condition.condition);
             if condition_level.is_none() {
-                log::error!("unexpected warn count");
-                return Err(actix_web::error::ErrorInternalServerError(""));
+                tracing::error!("unexpected warn count");
+                return Err(Error::Custom(http::StatusCode::INTERNAL_SERVER_ERROR, ""));
             }
             let condition_level = condition_level.unwrap();
             Some(GetIsuConditionResponse {
@@ -627,41 +678,43 @@ async fn get_isu_list(
         });
     }
 
-    tx.commit().await.map_err(SqlxError)?;
+    tx.commit().await?;
 
-    Ok(HttpResponse::Ok().json(response_list))
+    Ok(axum::Json(response_list))
 }
 
 // ISUを登録
-#[actix_web::post("/api/isu")]
+// POST /api/isu
 async fn post_isu(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-    mut payload: actix_multipart::Multipart,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+    mut payload: axum::extract::Multipart,
+) -> Result<(http::StatusCode, axum::Json<Isu>), Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
     let mut jia_isu_uuid = None;
     let mut isu_name = None;
     let mut image = None;
-    while let Some(field) = payload.next().await {
-        let field = field.map_err(|_| actix_web::error::ErrorBadRequest("bad format: icon"))?;
-        let content_disposition = field.content_disposition().unwrap();
-        let content = field
-            .map_ok(|chunk| bytes::BytesMut::from(&chunk[..]))
-            .try_concat()
-            .await
-            .map_err(|_| actix_web::error::ErrorBadRequest("bad format: icon"))?
-            .freeze();
-        match content_disposition.get_name().unwrap() {
+    while let Some(field) = payload
+        .next_field()
+        .await
+        .map_err(|_| Error::Custom(http::StatusCode::BAD_REQUEST, "bad format: icon"))?
+    {
+        match field.name().unwrap() {
             "jia_isu_uuid" => {
-                jia_isu_uuid = Some(String::from_utf8_lossy(&content).into_owned());
+                jia_isu_uuid = Some(field.text().await.map_err(|_| {
+                    Error::Custom(http::StatusCode::BAD_REQUEST, "bad format: icon")
+                })?);
             }
             "isu_name" => {
-                isu_name = Some(String::from_utf8_lossy(&content).into_owned());
+                isu_name = Some(field.text().await.map_err(|_| {
+                    Error::Custom(http::StatusCode::BAD_REQUEST, "bad format: icon")
+                })?);
             }
             "image" => {
-                image = Some(content);
+                image = Some(field.bytes().await.map_err(|_| {
+                    Error::Custom(http::StatusCode::BAD_REQUEST, "bad format: icon")
+                })?);
             }
             _ => {}
         }
@@ -672,14 +725,14 @@ async fn post_isu(
         Some(image) => image,
         None => {
             let content = tokio::fs::read(DEFAULT_ICON_FILE_PATH).await.map_err(|e| {
-                log::error!("{}", e);
+                tracing::error!("{}", e);
                 e
             })?;
             bytes::Bytes::from(content)
         }
     };
 
-    let mut tx = pool.begin().await.map_err(SqlxError)?;
+    let mut tx = pool.begin().await?;
 
     let result = sqlx::query(
         "INSERT INTO `isu` (`jia_isu_uuid`, `name`, `image`, `jia_user_id`) VALUES (?, ?, ?, ?)",
@@ -693,16 +746,13 @@ async fn post_isu(
     if let Err(sqlx::Error::Database(ref db_error)) = result {
         if let Some(mysql_error) = db_error.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
             if mysql_error.number() == MYSQL_ERR_NUM_DUPLICATE_ENTRY {
-                return Err(actix_web::error::ErrorConflict("duplicated: isu"));
+                return Err(Error::Custom(http::StatusCode::CONFLICT, "duplicated: isu"));
             }
         }
     }
-    result.map_err(SqlxError)?;
+    result?;
 
-    let target_url = format!(
-        "{}/api/activate",
-        get_jia_service_url(&mut tx).await.map_err(SqlxError)?
-    );
+    let target_url = format!("{}/api/activate", get_jia_service_url(&mut tx).await?);
     let body = JIAServiceRequest {
         target_base_url: &POST_ISUCONDITION_TARGET_BASE_URL,
         isu_uuid: &jia_isu_uuid,
@@ -714,37 +764,34 @@ async fn post_isu(
         .send()
         .await
         .map_err(|e| {
-            log::error!("failed to request to JIAService: {}", e);
-            ReqwestError(e)
+            tracing::error!("failed to request to JIAService: {}", e);
+            e
         })?;
 
     let status = resp.status();
     if status != reqwest::StatusCode::ACCEPTED {
         let body = resp.text().await.map_err(|e| {
-            log::error!("{}", e);
-            ReqwestError(e)
+            tracing::error!("{}", e);
+            e
         })?;
-        log::error!(
+        tracing::error!(
             "JIAService returned error: status code {}, message: {}",
             status,
             body
         );
-        return Err(
-            actix_web::error::InternalError::new("JIAService returned error", status).into(),
-        );
+        return Err(Error::Custom(status, "JIAService returned error"));
     }
 
     let isu_from_jia: IsuFromJIA = resp.json().await.map_err(|e| {
-        log::error!("error occured while reading JIA response: {}", e);
-        ReqwestError(e)
+        tracing::error!("error occured while reading JIA response: {}", e);
+        e
     })?;
 
     sqlx::query("UPDATE `isu` SET `character` = ? WHERE  `jia_isu_uuid` = ?")
         .bind(&isu_from_jia.character)
         .bind(&jia_isu_uuid)
         .execute(&mut tx)
-        .await
-        .map_err(SqlxError)?;
+        .await?;
 
     let isu: Isu = fetch_one_as(
         sqlx::query_as("SELECT * FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?")
@@ -752,60 +799,57 @@ async fn post_isu(
             .bind(&jia_isu_uuid),
         &mut tx,
     )
-    .await
-    .map_err(SqlxError)?;
+    .await?;
 
-    tx.commit().await.map_err(SqlxError)?;
+    tx.commit().await?;
 
-    Ok(HttpResponse::Created().json(isu))
+    Ok((http::StatusCode::CREATED, axum::Json(isu)))
 }
 
 // ISUの情報を取得
-#[actix_web::get("/api/isu/{jia_isu_uuid}")]
+// GET /api/isu/:jia_isu_uuid
 async fn get_isu_id(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-    jia_isu_uuid: web::Path<String>,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+    jia_isu_uuid: axum::extract::Path<String>,
+) -> Result<axum::Json<Isu>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
     let isu: Option<Isu> =
         sqlx::query_as("SELECT * FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?")
             .bind(&jia_user_id)
-            .bind(jia_isu_uuid.as_ref())
-            .fetch_optional(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
+            .bind(&*jia_isu_uuid)
+            .fetch_optional(&*pool)
+            .await?;
     if isu.is_none() {
-        return Err(actix_web::error::ErrorNotFound("not found: isu"));
+        return Err(Error::Custom(http::StatusCode::NOT_FOUND, "not found: isu"));
     }
     let isu = isu.unwrap();
 
-    Ok(HttpResponse::Ok().json(isu))
+    Ok(axum::Json(isu))
 }
 
 // ISUのアイコンを取得
-#[actix_web::get("/api/isu/{jia_isu_uuid}/icon")]
+// GET /api/isu/:jia_isu_uuid/icon
 async fn get_isu_icon(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-    jia_isu_uuid: web::Path<String>,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+    jia_isu_uuid: axum::extract::Path<String>,
+) -> Result<Vec<u8>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
     let image: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT `image` FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
     )
     .bind(&jia_user_id)
-    .bind(jia_isu_uuid.as_ref())
-    .fetch_optional(pool.as_ref())
-    .await
-    .map_err(SqlxError)?;
+    .bind(&*jia_isu_uuid)
+    .fetch_optional(&*pool)
+    .await?;
 
     if let Some(image) = image {
-        Ok(HttpResponse::Ok().body(image))
+        Ok(image)
     } else {
-        Err(actix_web::error::ErrorNotFound("not found: isu"))
+        Err(Error::Custom(http::StatusCode::NOT_FOUND, "not found: isu"))
     }
 }
 
@@ -815,14 +859,14 @@ struct GetIsuGraphQuery {
 }
 
 // ISUのコンディショングラフ描画のための情報を取得
-#[actix_web::get("/api/isu/{jia_isu_uuid}/graph")]
+// GET /api/isu/:jia_isu_uuid/graph
 async fn get_isu_graph(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-    jia_isu_uuid: web::Path<String>,
-    query: web::Query<GetIsuGraphQuery>,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+    jia_isu_uuid: axum::extract::Path<String>,
+    query: axum::extract::Query<GetIsuGraphQuery>,
+) -> Result<axum::Json<Vec<GraphResponse>>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
     let date = match &query.datetime {
         Some(datetime_str) => match datetime_str.parse() {
@@ -832,35 +876,40 @@ async fn get_isu_graph(
                     .unwrap()
             }
             Err(_) => {
-                return Err(actix_web::error::ErrorBadRequest("bad format: datetime"));
+                return Err(Error::Custom(
+                    http::StatusCode::BAD_REQUEST,
+                    "bad format: datetime",
+                ));
             }
         },
         None => {
-            return Err(actix_web::error::ErrorBadRequest("missing: datetime"));
+            return Err(Error::Custom(
+                http::StatusCode::BAD_REQUEST,
+                "missing: datetime",
+            ));
         }
     };
 
-    let mut tx = pool.begin().await.map_err(SqlxError)?;
+    let mut tx = pool.begin().await?;
 
     let count: i64 = fetch_one_scalar(
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
         )
         .bind(&jia_user_id)
-        .bind(jia_isu_uuid.as_ref()),
+        .bind(&*jia_isu_uuid),
         &mut tx,
     )
-    .await
-    .map_err(SqlxError)?;
+    .await?;
     if count == 0 {
-        return Err(actix_web::error::ErrorNotFound("not found: isu"));
+        return Err(Error::Custom(http::StatusCode::NOT_FOUND, "not found: isu"));
     }
 
     let res = generate_isu_graph_response(&mut tx, &jia_isu_uuid, date).await?;
 
-    tx.commit().await.map_err(SqlxError)?;
+    tx.commit().await?;
 
-    Ok(HttpResponse::Ok().json(res))
+    Ok(axum::Json(res))
 }
 
 // グラフのデータ点を一日分生成
@@ -868,7 +917,7 @@ async fn generate_isu_graph_response(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     jia_isu_uuid: &str,
     graph_date: DateTime<chrono::FixedOffset>,
-) -> actix_web::Result<Vec<GraphResponse>> {
+) -> Result<Vec<GraphResponse>, Error> {
     let mut data_points = Vec::new();
     let mut conditions_in_this_hour = Vec::new();
     let mut timestamps_in_this_hour = Vec::new();
@@ -882,7 +931,7 @@ async fn generate_isu_graph_response(
     .fetch(tx);
 
     while let Some(row) = rows.next().await {
-        let condition: IsuCondition = row.map_err(SqlxError)?;
+        let condition: IsuCondition = row?;
 
         let truncated_condition_time = condition
             .timestamp
@@ -953,9 +1002,7 @@ async fn generate_isu_graph_response(
 }
 
 // 複数のISUのコンディションからグラフの一つのデータ点を計算
-fn calculate_graph_data_point(
-    isu_conditions: &[IsuCondition],
-) -> actix_web::Result<GraphDataPoint> {
+fn calculate_graph_data_point(isu_conditions: &[IsuCondition]) -> Result<GraphDataPoint, Error> {
     use std::iter::FromIterator as _;
 
     let mut conditions_count: HashMap<&str, i64> =
@@ -963,7 +1010,8 @@ fn calculate_graph_data_point(
     let mut raw_score = 0;
     for condition in isu_conditions {
         if !is_valid_condition_format(&condition.condition) {
-            return Err(actix_web::error::ErrorInternalServerError(
+            return Err(Error::Custom(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid condition format",
             ));
         }
@@ -1027,17 +1075,20 @@ struct GetIsuConditionsQuery {
 }
 
 // ISUのコンディションを取得
-#[actix_web::get("/api/condition/{jia_isu_uuid}")]
+// GET /api/condition/:jia_isu_uuid
 async fn get_isu_conditions(
-    pool: web::Data<sqlx::MySqlPool>,
-    session: actix_session::Session,
-    jia_isu_uuid: web::Path<String>,
-    query: web::Query<GetIsuConditionsQuery>,
-) -> actix_web::Result<HttpResponse> {
-    let jia_user_id = require_signed_in(pool.as_ref(), session).await?;
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    session: tower_cookie_store::Session,
+    jia_isu_uuid: axum::extract::Path<String>,
+    query: axum::extract::Query<GetIsuConditionsQuery>,
+) -> Result<axum::Json<Vec<GetIsuConditionResponse>>, Error> {
+    let jia_user_id = require_signed_in(&*pool, session).await?;
 
     if jia_isu_uuid.is_empty() {
-        return Err(actix_web::error::ErrorBadRequest("missing: jia_isu_uuid"));
+        return Err(Error::Custom(
+            http::StatusCode::BAD_REQUEST,
+            "missing: jia_isu_uuid",
+        ));
     }
     let end_time = match &query.end_time {
         Some(end_time_str) => match end_time_str.parse() {
@@ -1045,15 +1096,22 @@ async fn get_isu_conditions(
                 DateTime::from_utc(NaiveDateTime::from_timestamp(end_time, 0), JST_OFFSET.fix())
             }
             Err(_) => {
-                return Err(actix_web::error::ErrorBadRequest("bad format: end_time"));
+                return Err(Error::Custom(
+                    http::StatusCode::BAD_REQUEST,
+                    "bad format: end_time",
+                ));
             }
         },
         None => {
-            return Err(actix_web::error::ErrorBadRequest("bad format: end_time"));
+            return Err(Error::Custom(
+                http::StatusCode::BAD_REQUEST,
+                "bad format: end_time",
+            ));
         }
     };
     if query.condition_level.is_none() {
-        return Err(actix_web::error::ErrorBadRequest(
+        return Err(Error::Custom(
+            http::StatusCode::BAD_REQUEST,
             "missing: condition_level",
         ));
     }
@@ -1069,7 +1127,10 @@ async fn get_isu_conditions(
                 JST_OFFSET.fix(),
             )),
             Err(_) => {
-                return Err(actix_web::error::ErrorBadRequest("bad format: start_time"));
+                return Err(Error::Custom(
+                    http::StatusCode::BAD_REQUEST,
+                    "bad format: start_time",
+                ));
             }
         },
         None => None,
@@ -1077,14 +1138,13 @@ async fn get_isu_conditions(
 
     let isu_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM `isu` WHERE `jia_isu_uuid` = ? AND `jia_user_id` = ?")
-            .bind(jia_isu_uuid.as_ref())
+            .bind(&*jia_isu_uuid)
             .bind(&jia_user_id)
-            .fetch_optional(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
+            .fetch_optional(&*pool)
+            .await?;
     if isu_name.is_none() {
-        log::error!("isu not found");
-        return Err(actix_web::error::ErrorNotFound("not found: isu"));
+        tracing::error!("isu not found");
+        return Err(Error::Custom(http::StatusCode::NOT_FOUND, "not found: isu"));
     }
     let isu_name = isu_name.unwrap();
 
@@ -1097,10 +1157,9 @@ async fn get_isu_conditions(
         CONDITION_LIMIT,
         &isu_name,
     )
-    .await
-    .map_err(SqlxError)?;
+    .await?;
 
-    Ok(HttpResponse::Ok().json(conditions_response))
+    Ok(axum::Json(conditions_response))
 }
 
 async fn get_isu_conditions_from_db(
@@ -1165,22 +1224,22 @@ fn calculate_condition_level(condition: &str) -> Option<&'static str> {
 }
 
 // ISUの性格毎の最新のコンディション情報
-#[actix_web::get("/api/trend")]
-async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpResponse> {
+// GET /api/trend
+async fn get_trend(
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+) -> Result<axum::Json<Vec<TrendResponse>>, Error> {
     let character_list: Vec<String> =
         sqlx::query_scalar("SELECT `character` FROM `isu` GROUP BY `character`")
-            .fetch_all(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
+            .fetch_all(&*pool)
+            .await?;
 
     let mut res = Vec::new();
 
     for character in character_list {
         let isu_list: Vec<Isu> = sqlx::query_as("SELECT * FROM `isu` WHERE `character` = ?")
             .bind(&character)
-            .fetch_all(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
+            .fetch_all(&*pool)
+            .await?;
 
         let mut character_info_isu_conditions = Vec::new();
         let mut character_warning_isu_conditions = Vec::new();
@@ -1190,16 +1249,15 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
                 "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC",
             )
             .bind(&isu.jia_isu_uuid)
-            .fetch_all(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
+            .fetch_all(&*pool)
+            .await?;
 
             if !conditions.is_empty() {
                 let isu_last_condition = &conditions[0];
                 let condition_level = calculate_condition_level(&isu_last_condition.condition);
                 if condition_level.is_none() {
-                    log::error!("unexpected warn count");
-                    return Err(actix_web::error::ErrorInternalServerError(""));
+                    tracing::error!("unexpected warn count");
+                    return Err(Error::Custom(http::StatusCode::INTERNAL_SERVER_ERROR, ""));
                 }
                 let condition_level = condition_level.unwrap();
                 let trend_condition = TrendCondition {
@@ -1229,38 +1287,40 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
         });
     }
 
-    Ok(HttpResponse::Ok().json(res))
+    Ok(axum::Json(res))
 }
 
 // ISUからのコンディションを受け取る
-#[actix_web::post("/api/condition/{jia_isu_uuid}")]
+// POST /api/condition/:jia_isu_uuid
 async fn post_isu_condition(
-    pool: web::Data<sqlx::MySqlPool>,
-    jia_isu_uuid: web::Path<String>,
-    req: web::Json<Vec<PostIsuConditionRequest>>,
-) -> actix_web::Result<HttpResponse> {
+    pool: axum::extract::Extension<sqlx::MySqlPool>,
+    jia_isu_uuid: axum::extract::Path<String>,
+    req: axum::extract::Json<Vec<PostIsuConditionRequest>>,
+) -> Result<http::StatusCode, Error> {
     // TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
     const DROP_PROBABILITY: f64 = 0.9;
     if rand::random::<f64>() <= DROP_PROBABILITY {
-        log::warn!("drop post isu condition request");
-        return Ok(HttpResponse::Accepted().finish());
+        tracing::warn!("drop post isu condition request");
+        return Ok(http::StatusCode::ACCEPTED);
     }
 
     if req.is_empty() {
-        return Err(actix_web::error::ErrorBadRequest("bad request body"));
+        return Err(Error::Custom(
+            http::StatusCode::BAD_REQUEST,
+            "bad request body",
+        ));
     }
 
-    let mut tx = pool.begin().await.map_err(SqlxError)?;
+    let mut tx = pool.begin().await?;
 
     let count: i64 = fetch_one_scalar(
         sqlx::query_scalar("SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?")
-            .bind(jia_isu_uuid.as_ref()),
+            .bind(&*jia_isu_uuid),
         &mut tx,
     )
-    .await
-    .map_err(SqlxError)?;
+    .await?;
     if count == 0 {
-        return Err(actix_web::error::ErrorNotFound("not found: isu"));
+        return Err(Error::Custom(http::StatusCode::NOT_FOUND, "not found: isu"));
     }
 
     for cond in req.iter() {
@@ -1270,24 +1330,27 @@ async fn post_isu_condition(
         );
 
         if !is_valid_condition_format(&cond.condition) {
-            return Err(actix_web::error::ErrorBadRequest("bad request body"));
+            return Err(Error::Custom(
+                http::StatusCode::BAD_REQUEST,
+                "bad request body",
+            ));
         }
 
         sqlx::query(
             "INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) VALUES (?, ?, ?, ?, ?)",
         )
-            .bind(jia_isu_uuid.as_ref())
+            .bind(&*jia_isu_uuid)
             .bind(&timestamp.naive_local())
             .bind(&cond.is_sitting)
             .bind(&cond.condition)
             .bind(&cond.message)
             .execute(&mut tx)
-            .await.map_err(SqlxError)?;
+            .await?;
     }
 
-    tx.commit().await.map_err(SqlxError)?;
+    tx.commit().await?;
 
-    Ok(HttpResponse::Accepted().finish())
+    Ok(http::StatusCode::ACCEPTED)
 }
 
 // ISUのコンディションの文字列がcsv形式になっているか検証
@@ -1321,10 +1384,4 @@ fn is_valid_condition_format(condition_str: &str) -> bool {
     }
 
     idx_cond_str == condition_str.len()
-}
-
-async fn get_index() -> actix_web::Result<actix_files::NamedFile> {
-    Ok(actix_files::NamedFile::open(
-        std::path::Path::new(FRONTEND_CONTENTS_PATH).join("index.html"),
-    )?)
 }
